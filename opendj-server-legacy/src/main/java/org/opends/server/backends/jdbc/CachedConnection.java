@@ -128,7 +128,7 @@ public class CachedConnection implements Connection {
     public void close() throws SQLException {
         rollback();
         try {
-            cached.get(connectionString).add(this);
+            cached.get(connectionString).add(parent);
         } catch (ExecutionException e) {
             throw new RuntimeException(e);
         }
