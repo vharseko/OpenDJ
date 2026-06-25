@@ -72,7 +72,7 @@ bench_one() {
       -Jhost=localhost -Jport=1389 -Jbasedn="$BASEDN" \
       -Jadminbinddn="cn=Directory Manager" -Jadminbindpw=password -Jbenchpw="$BENCHPW" \
       -Jthreads="$THREADS" -Jduration="$DURATION" -Jrampup=0 \
-      -Jjmeter.reportgenerator.sample_filter='^(?!ADMIN_CONNECT).*' \
+      -Jjmeter.reportgenerator.sample_filter='^(?!ADMIN_CONNECT)(?!BIND_CONNECT).*' \
       -l "$out.jtl" -e -o "$out" > "$out.jmeter.out" 2>&1 || true
     docker logs opendj-bench > "$out.docker.log" 2>&1 || true
     # surface distinct error messages to the step log (stderr; stdout carries the version)
@@ -105,6 +105,7 @@ B_VER="$(bench_one "$B_IMAGE" b)"
   echo ""
   echo "- **${A_NAME}** = freshly built image; **${B_NAME}** = latest released image. Both are"
   echo "  OpenDJ, so they share the same default password storage scheme (hashing parity is automatic)."
-  echo "- The admin connection bind (\`ADMIN_CONNECT\`) is cached per thread and excluded; \`BIND\` is"
-  echo "  the measured user authentication (\`test=sbind\`, single bind/unbind)."
+  echo "- The once-per-thread connection setups (\`ADMIN_CONNECT\`, \`BIND_CONNECT\`) are cached per thread"
+  echo "  and excluded; \`BIND\` is the measured user authentication - an LDAP re-bind"
+  echo "  (\`LdapContext.reconnect()\`) on a persistent per-thread connection, no per-iteration reconnect."
 } >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}"

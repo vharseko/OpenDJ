@@ -17,7 +17,7 @@
 <jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
   <hashTree>
     <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="OpenDJ vs OpenLDAP - LDAP benchmark" enabled="true">
-      <stringProp name="TestPlan.comments">Parametrized LDAP benchmark. Admin bind is cached once per thread (Once Only Controller, labelled ADMIN_CONNECT, excluded from metrics). Data ops (ADD/SEARCH/COMPARE/MODIFY/DELETE/READD) reuse the cached admin connection. Entries use mail as the naming/searchable attribute (equality-indexed by default on BOTH OpenDJ and OpenLDAP); only mail + objectClass (both indexed on both servers) are stored, keeping the write cost symmetric. Every created value is unique: ADD uses a per-iteration counter, READD uses a UUID. The measured user authentication is a single bind/unbind (test=sbind, own connection) after MODIFY has set the userPassword.</stringProp>
+      <stringProp name="TestPlan.comments">Parametrized LDAP benchmark. Admin bind is cached once per thread (Once Only Controller, labelled ADMIN_CONNECT, excluded from metrics). Data ops (ADD/SEARCH/COMPARE/MODIFY/DELETE/READD) reuse the cached admin connection. Entries use mail as the naming/searchable attribute (equality-indexed by default on BOTH OpenDJ and OpenLDAP); only mail + objectClass (both indexed on both servers) are stored, keeping the write cost symmetric. Every created value is unique: ADD uses a per-iteration counter, READD uses a UUID. The measured user authentication (BIND) is an LDAP re-bind on a persistent per-thread connection: BIND_CONNECT opens one connection per thread (excluded from metrics, like ADMIN_CONNECT) and BIND re-authenticates as the iteration's user via LdapContext.reconnect() on that same socket - no per-iteration TCP reconnect or unbind/disconnect - after MODIFY has set the userPassword.</stringProp>
       <boolProp name="TestPlan.functional_mode">false</boolProp>
       <boolProp name="TestPlan.tearDown_on_shutdown">true</boolProp>
       <boolProp name="TestPlan.serialize_threadgroups">false</boolProp>
@@ -79,6 +79,33 @@
             <stringProp name="newdn"></stringProp>
             <stringProp name="test">bind</stringProp>
           </LDAPExtSampler>
+          <hashTree/>
+
+          <!-- BIND_CONNECT: open ONE LDAP connection per thread (admin bind) and cache it in
+               vars['bindCtx']. BIND reuses it for per-iteration re-binds. Excluded from metrics like
+               ADMIN_CONNECT. -->
+          <JSR223Sampler guiclass="TestBeanGUI" testclass="JSR223Sampler" testname="BIND_CONNECT" enabled="true">
+            <stringProp name="cacheKey">true</stringProp>
+            <stringProp name="filename"></stringProp>
+            <stringProp name="parameters"></stringProp>
+            <stringProp name="scriptLanguage">groovy</stringProp>
+            <stringProp name="script">import javax.naming.Context
+import javax.naming.ldap.InitialLdapContext
+
+if (vars.getObject('bindCtx') == null) {
+    // Open the socket once, bound as admin (always valid) so connect never depends on anonymous policy.
+    // BIND re-binds this same connection as the iteration's user via reconnect().
+    Hashtable env = new Hashtable()
+    env.put(Context.INITIAL_CONTEXT_FACTORY, 'com.sun.jndi.ldap.LdapCtxFactory')
+    env.put(Context.PROVIDER_URL, 'ldap://' + (props.get('host') ?: 'localhost') + ':' + (props.get('port') ?: '1389'))
+    env.put('com.sun.jndi.ldap.connect.timeout', '60000')
+    env.put(Context.REFERRAL, 'throw')
+    env.put(Context.SECURITY_AUTHENTICATION, 'simple')
+    env.put(Context.SECURITY_PRINCIPAL, props.get('adminbinddn') ?: 'cn=Directory Manager')
+    env.put(Context.SECURITY_CREDENTIALS, props.get('adminbindpw') ?: 'password')
+    vars.putObject('bindCtx', new InitialLdapContext(env, null))
+}</stringProp>
+          </JSR223Sampler>
           <hashTree/>
         </hashTree>
 
@@ -182,7 +209,7 @@
         <hashTree/>
 
         <!-- MODIFY (admin connection): write a normal attribute (description) and set userPassword
-             (cleartext) so the server hashes it; the user then authenticates with it (sbind). -->
+             (cleartext) so the server hashes it; the user then authenticates with it (BIND re-bind). -->
         <LDAPExtSampler guiclass="LdapExtTestSamplerGui" testclass="LDAPExtSampler" testname="MODIFY" enabled="true">
           <stringProp name="servername"></stringProp>
           <stringProp name="port"></stringProp>
@@ -223,29 +250,41 @@
         </LDAPExtSampler>
         <hashTree/>
 
-        <!-- BIND (measured user authentication): single bind/unbind on its own connection,
-             does NOT disturb the cached admin connection. -->
-        <LDAPExtSampler guiclass="LdapExtTestSamplerGui" testclass="LDAPExtSampler" testname="BIND" enabled="true">
-          <stringProp name="servername">${__P(host,localhost)}</stringProp>
-          <stringProp name="port">${__P(port,1389)}</stringProp>
-          <stringProp name="rootdn">ou=People,${__P(basedn,dc=example\,dc=com)}</stringProp>
-          <stringProp name="scope">2</stringProp>
-          <stringProp name="countlimit"></stringProp>
-          <stringProp name="timelimit"></stringProp>
-          <stringProp name="attributes"></stringProp>
-          <stringProp name="return_object">false</stringProp>
-          <stringProp name="deref_aliases">false</stringProp>
-          <stringProp name="connection_timeout">60000</stringProp>
-          <stringProp name="parseflag">false</stringProp>
-          <stringProp name="secure">false</stringProp>
-          <stringProp name="user_dn">mail=u_${__threadNum}_${iter}@test.com,ou=People,${__P(basedn,dc=example\,dc=com)}</stringProp>
-          <stringProp name="user_pw">${__P(benchpw,benchPass1)}</stringProp>
-          <stringProp name="comparedn"></stringProp>
-          <stringProp name="comparefilt"></stringProp>
-          <stringProp name="modddn"></stringProp>
-          <stringProp name="newdn"></stringProp>
-          <stringProp name="test">sbind</stringProp>
-        </LDAPExtSampler>
+        <!-- BIND (measured user authentication): an LDAP re-bind on the persistent per-thread
+             connection opened once by BIND_CONNECT. LdapContext.reconnect() sends a fresh BIND PDU on
+             the existing socket - no TCP reconnect, no unbind/disconnect between iterations. Binds as
+             mail=u_THREAD_ITER,ou=People with the password MODIFY set. Parameters carry the per-iteration
+             user DN and password (args[0], args[1]); the script never disturbs the admin connection. -->
+        <JSR223Sampler guiclass="TestBeanGUI" testclass="JSR223Sampler" testname="BIND" enabled="true">
+          <stringProp name="cacheKey">true</stringProp>
+          <stringProp name="filename"></stringProp>
+          <stringProp name="parameters">mail=u_${__threadNum}_${iter}@test.com,ou=People,${__P(basedn,dc=example\,dc=com)} ${__P(benchpw,benchPass1)}</stringProp>
+          <stringProp name="scriptLanguage">groovy</stringProp>
+          <stringProp name="script">import javax.naming.Context
+import javax.naming.ldap.LdapContext
+import javax.naming.ldap.InitialLdapContext
+
+LdapContext c = (LdapContext) vars.getObject('bindCtx')
+if (c == null) {
+    // Defensive: BIND_CONNECT normally opens this once per thread in the Once Only controller.
+    Hashtable env = new Hashtable()
+    env.put(Context.INITIAL_CONTEXT_FACTORY, 'com.sun.jndi.ldap.LdapCtxFactory')
+    env.put(Context.PROVIDER_URL, 'ldap://' + (props.get('host') ?: 'localhost') + ':' + (props.get('port') ?: '1389'))
+    env.put('com.sun.jndi.ldap.connect.timeout', '60000')
+    env.put(Context.REFERRAL, 'throw')
+    env.put(Context.SECURITY_AUTHENTICATION, 'simple')
+    env.put(Context.SECURITY_PRINCIPAL, props.get('adminbinddn') ?: 'cn=Directory Manager')
+    env.put(Context.SECURITY_CREDENTIALS, props.get('adminbindpw') ?: 'password')
+    c = new InitialLdapContext(env, null)
+    vars.putObject('bindCtx', c)
+}
+String userDN = args[0]
+SampleResult.setSamplerData('rebind as ' + userDN)
+c.addToEnvironment(Context.SECURITY_AUTHENTICATION, 'simple')
+c.addToEnvironment(Context.SECURITY_PRINCIPAL, userDN)
+c.addToEnvironment(Context.SECURITY_CREDENTIALS, args[1])
+c.reconnect(null)</stringProp>
+        </JSR223Sampler>
         <hashTree/>
 
         <!-- DELETE (admin connection): remove the per-iteration entry. -->

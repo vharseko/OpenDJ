@@ -71,8 +71,8 @@ jobs:
       JMETER: ${{ inputs.jmeter_version || '5.6.3' }}
       BENCHPW: benchPass1
       BASEDN: dc=example,dc=com
-      # Exclude the cached admin connection bind from the dashboard / statistics.json.
-      SAMPLE_FILTER: '^(?!ADMIN_CONNECT).*'
+      # Exclude the once-per-thread connection setups (admin + bind) from the dashboard / statistics.json.
+      SAMPLE_FILTER: '^(?!ADMIN_CONNECT)(?!BIND_CONNECT).*'
       HEAP: -Xms1g -Xmx2g
     steps:
       - uses: actions/checkout@v6
@@ -247,9 +247,10 @@ jobs:
             echo ""
             echo "### Notes"
             echo ""
-            echo '- `BIND` is the measured **user authentication** (`test=sbind`, single bind/unbind on its'
-            echo '  own connection) as `mail=u_<n>,ou=People` with the password set by `MODIFY`. The admin'
-            echo '  connection bind (`ADMIN_CONNECT`) is cached once per thread and excluded from these results.'
+            echo '- `BIND` is the measured **user authentication**: an LDAP re-bind (`LdapContext.reconnect()`)'
+            echo '  on a persistent per-thread connection as `mail=u_<n>,ou=People` with the password set by'
+            echo '  `MODIFY` - no per-iteration TCP reconnect. The once-per-thread connection setups'
+            echo '  (`ADMIN_CONNECT`, `BIND_CONNECT`) are cached per thread and excluded from these results.'
             echo '- `MODIFY` sends the password in cleartext; each server hashes it on write with the **same'
             echo '  scheme (`{SSHA}`, Salted SHA-1)** — OpenLDAP via the ppolicy hash-cleartext overlay, OpenDJ'
             echo '  via its Salted SHA-1 default scheme — so `BIND` authentication is compared on equal footing.'
