@@ -1076,6 +1076,35 @@ public class ModifyConflictTest extends ReplicationTestCase
   }
 
   /**
+   * The same for a replayed modification which only deletes an object class.
+   * <p>
+   * The case above cannot tell whether the delete resets the attribute of the entry: the add runs
+   * first and resets it already. Here the read of the conflict resolution is the last one before
+   * the delete, so the entry answers out of what the delete leaves behind. The entry needs a second
+   * object class for that to be visible at all - with an empty map the entry answers nothing
+   * whatever attribute it kept.
+   */
+  @Test
+  public void replayObjectClassDelete() throws Exception
+  {
+    Entry entry = initializeEntry();
+    entry.addObjectClass(CoreSchema.getExtensibleObjectObjectClass());
+    EntryHistorical hist = EntryHistorical.newInstanceFromEntry(entry);
+
+    List<Modification> mods = newArrayList(newModification(DELETE, OBJECTCLASS, ORGANIZATION));
+
+    // The conflict resolution, which reads the entry to solve the delete.
+    replayModifies(entry, hist, 10, mods);
+    assertThat(mods).hasSize(1);
+
+    // The core, which applies the modification to the entry.
+    applyModificationsTheWayTheCoreDoes(entry, mods);
+
+    assertThat(entry.getObjectClasses().values()).containsOnly(EXTENSIBLEOBJECT);
+    assertThat(objectClassAttributeOf(entry)).containsOnly(EXTENSIBLEOBJECT);
+  }
+
+  /**
    * Applies the modifications to the entry the way {@code LocalBackendModifyOperation} does, that
    * is with {@code addAttribute()} and {@code removeAttribute()} rather than with
    * {@code Entry.applyModifications()}.

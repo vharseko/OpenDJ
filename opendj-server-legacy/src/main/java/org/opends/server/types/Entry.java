@@ -223,6 +223,12 @@ public class Entry
    * Retrieves the set of objectclasses defined for this entry.  The
    * caller should be allowed to modify the contents of this list, but
    * if it does then it should also invalidate the attachment.
+   * <p>
+   * The map returned is the one the entry holds, and changing it goes past every reset the
+   * mutators do: neither the attachment nor the objectClass attribute of
+   * {@link #getObjectClassAttribute()} is invalidated, so on an entry which has already been read
+   * both are left stale. Change it only on an entry nothing has read yet; otherwise go through
+   * {@link #addObjectClass(ObjectClass)} or {@link #removeAttribute(Attribute, Collection)}.
    *
    * @return  The set of objectclasses defined for this entry.
    */

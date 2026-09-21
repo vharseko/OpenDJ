@@ -638,6 +638,16 @@ public final class Upgrade
             START_TRANSACTION_HANDLER_ENTRY),
         addConfigEntry(END_TRANSACTION_HANDLER_ENTRY));
 
+    /* See issue #1021: before 5.2.0 a modification of the objectClass attribute which arrived
+     * through replication reached the stored entry but not the objectClass index of the backend
+     * which replayed it, because the entry was indexed through an objectClass attribute built
+     * before the change. The fix stops that happening again; the records already written stay
+     * wrong until the index is rebuilt, which is what this offers. Only a server which replayed
+     * such a modification is affected - the one a write landed on directly indexed it correctly -
+     * so the task asks rather than rebuilds, as the 3.5.0 one above does. */
+    register("5.2.0",
+        rebuildIndexesNamed(INFO_UPGRADE_REBUILD_INDEXES_OBJECT_CLASS.get(), "objectClass"));
+
     /*
      * See issue #746. Builds before #661 (fixed in 5.1.2) shipped a duplicate
      * org.openidentityplatform.opendj.opendj-server-legacy.jar alongside opendj.jar in lib/.

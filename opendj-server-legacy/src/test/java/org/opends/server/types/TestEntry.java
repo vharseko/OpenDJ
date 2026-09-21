@@ -47,9 +47,9 @@ import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 /**
- * This class defines a set of tests for the {@link Entry} class.
- * <p>
- * At the moment this test suite only tests the parseAttribute method.
+ * This class defines a set of tests for the {@link Entry} class: the object classes of an entry and
+ * the attribute it hands them out as, the delete and lookup of attribute values, and
+ * {@code parseAttribute}.
  */
 @SuppressWarnings("javadoc")
 public final class TestEntry extends TypesTestCase {
@@ -215,6 +215,39 @@ public final class TestEntry extends TypesTestCase {
     assertThat(objectClassAttributeOf(e)).isEmpty();
 
     e.addObjectClass(CoreSchema.getTopObjectClass());
+    assertThat(objectClassAttributeOf(e)).containsOnly("top");
+  }
+
+  /*
+   * The two cases below repopulate the object classes through the map getObjectClasses() hands out,
+   * which resets nothing. That is the only reader which can tell whether the clear itself dropped
+   * the attribute: while the map is empty getObjectClassAttribute() answers null whatever it holds,
+   * so a clear which left the attribute behind is invisible to every other road.
+   */
+
+  /** All the object classes cleared by {@code removeAttribute(AttributeType)}. */
+  @Test
+  public void testObjectClassAttributeAfterClearByAttributeType() throws Exception
+  {
+    Entry e = newTestUserEntry();
+    assertThat(objectClassAttributeOf(e)).contains("inetOrgPerson");
+
+    e.removeAttribute(getObjectClassAttributeType());
+    e.getObjectClasses().put(CoreSchema.getTopObjectClass(), "top");
+
+    assertThat(objectClassAttributeOf(e)).containsOnly("top");
+  }
+
+  /** All the object classes cleared by {@code removeAttribute()} with a valueless attribute. */
+  @Test
+  public void testObjectClassAttributeAfterClearByEmptyAttribute() throws Exception
+  {
+    Entry e = newTestUserEntry();
+    assertThat(objectClassAttributeOf(e)).contains("inetOrgPerson");
+
+    e.removeAttribute(Attributes.empty(getObjectClassAttributeType()), new LinkedList<ByteString>());
+    e.getObjectClasses().put(CoreSchema.getTopObjectClass(), "top");
+
     assertThat(objectClassAttributeOf(e)).containsOnly("top");
   }
 
