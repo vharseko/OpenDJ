@@ -78,6 +78,7 @@ import org.opends.server.replication.service.ReplicationBroker;
 import org.opends.server.util.TestTimer;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 /**
@@ -1175,6 +1176,83 @@ public class ReplicationBrokerStopTest extends ReplicationTestCase
     }
   }
 
+  @DataProvider
+  public Object[][] failoverStartReplyTimeouts()
+  {
+    return new Object[][] {
+        { 0, 1, false }, // The discovery probe times out.
+        { 1, 1, false }, // The probe succeeds, but the elected RS's start reply times out.
+        { 0, 2, false }, // The discovery timeout is followed by another timeout.
+        { 1, 2, false }, // The elected RS times out again.
+        { 0, 1, true }   // Both initial probes time out.
+    };
+  }
+
+  @Test(dataProvider = "failoverStartReplyTimeouts", timeOut = 120_000)
+  public void failoverAllowsOneRetryOfTheSurvivingRs(int successfulProbes, int timedOutReplies,
+      boolean oldRsProbeTimesOut) throws Exception
+  {
+    TestCaseUtils.initializeTestBackend(true);
+    final WithholdingReplicationServer first = new WithholdingReplicationServer(LARGE_WINDOW);
+    final WithholdingReplicationServer second = new WithholdingReplicationServer(LARGE_WINDOW, 4);
+    // The configured URLs are sorted, so the old RS is probed first.
+    final boolean firstSortsFirst = first.getAddress().compareTo(second.getAddress()) < 0;
+    final WithholdingReplicationServer oldRS = firstSortsFirst ? first : second;
+    final WithholdingReplicationServer nextRS = firstSortsFirst ? second : first;
+    final DelayedFailoverHandshake handshake = new DelayedFailoverHandshake(successfulProbes, timedOutReplies);
+    final DelayedFailoverHandshake oldHandshake = new DelayedFailoverHandshake(0, 2);
+    try
+    {
+      final LDAPReplicationDomain domain = startDomain(oldRS, 100000, nextRS.getAddress());
+      assertEquals(domain.getRsServerId(), oldRS.serverId);
+      nextRS.delayedFailoverHandshake = handshake;
+      nextRS.start();
+      if (oldRsProbeTimesOut)
+      {
+        newTimer().repeatUntilSuccess(() -> assertNotNull(oldRS.session.get()));
+        oldRS.delayedFailoverHandshake = oldHandshake;
+        oldRS.dropTheSession();
+      }
+      else
+      {
+        oldRS.shutdown();
+      }
+
+      await(handshake.nextStartReceived);
+      if (oldRsProbeTimesOut)
+      {
+        assertEquals(oldHandshake.starts.get(), 1, "the broker retried the former RS before the survivor");
+      }
+      if (timedOutReplies == 1)
+      {
+        assertFalse(domain.hasConnectionError(), "the broker rejected writes before retrying the surviving RS");
+      }
+      else
+      {
+        assertTrue(domain.hasConnectionError(), "the broker did not report isolation after the retry expired");
+        assertEquals(replaceDescription("while isolated"), ResultCode.UNWILLING_TO_PERFORM);
+      }
+      handshake.sendNextReply.countDown();
+
+      newTimer().repeatUntilSuccess(() -> assertEquals(domain.getRsServerId(), nextRS.serverId));
+      assertEquals(replaceDescription("after failover"), ResultCode.SUCCESS);
+      nextRS.waitForUpdates(1);
+    }
+    finally
+    {
+      handshake.sendNextReply.countDown();
+      oldHandshake.sendNextReply.countDown();
+      try
+      {
+        nextRS.shutdown();
+      }
+      finally
+      {
+        cleanUp(oldRS);
+      }
+    }
+  }
+
   private LDAPReplicationDomain startDomain(WithholdingReplicationServer rs) throws Exception
   {
     // Heartbeats far apart: the session stays up whatever the replication server reads.
@@ -1425,6 +1503,39 @@ public class ReplicationBrokerStopTest extends ReplicationTestCase
     return new TestTimer.Builder().maxSleep(10, SECONDS).sleepTimes(50, MILLISECONDS).toTimer();
   }
 
+  /** Delays selected start replies and lets the test inspect the broker before it can reconnect. */
+  private static final class DelayedFailoverHandshake
+  {
+    private final int successfulProbes;
+    private final int timedOutReplies;
+    private final AtomicInteger starts = new AtomicInteger();
+    private final CountDownLatch nextStartReceived = new CountDownLatch(1);
+    private final CountDownLatch sendNextReply = new CountDownLatch(1);
+
+    DelayedFailoverHandshake(int successfulProbes, int timedOutReplies)
+    {
+      this.successfulProbes = successfulProbes;
+      this.timedOutReplies = timedOutReplies;
+    }
+
+    boolean respond(Session session) throws Exception
+    {
+      final int attempt = starts.incrementAndGet() - successfulProbes;
+      if (attempt >= 1 && attempt <= timedOutReplies)
+      {
+        session.setSoTimeout(2 * MultimasterReplication.getConnectionTimeoutMS());
+        session.receive(); // The broker closes the session after its read deadline.
+        return false;
+      }
+      if (attempt == timedOutReplies + 1)
+      {
+        nextStartReceived.countDown();
+        await(sendNextReply);
+      }
+      return true;
+    }
+  }
+
   /**
    * A replication server which keeps the session of the domain up and reads every message of it,
    * but gives no credit beyond the window it opens the session with - of one update, unless the
@@ -1459,6 +1570,7 @@ public class ReplicationBrokerStopTest extends ReplicationTestCase
     private boolean reading = true;
     /** Whether this server is away: it then sends no heartbeat, and answers no connection either. */
     private volatile boolean away;
+    private volatile DelayedFailoverHandshake delayedFailoverHandshake;
 
     WithholdingReplicationServer() throws IOException
     {
@@ -1542,6 +1654,10 @@ public class ReplicationBrokerStopTest extends ReplicationTestCase
         s = new ReplSessionSecurity().createServerSession(socket, MultimasterReplication.getConnectionTimeoutMS());
         sessions.add(s);
         final ServerStartMsg start = (ServerStartMsg) s.receive();
+        if (delayedFailoverHandshake != null && !delayedFailoverHandshake.respond(s))
+        {
+          return;
+        }
         final String url = getAddress();
         s.publish(new ReplServerStartMsg(serverId, url, start.getBaseDN(), window, state.duplicate(),
             start.getGenerationId(), start.getSSLEncryption(), start.getGroupId(), 5000));
